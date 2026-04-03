@@ -37,3 +37,5 @@ flutter:
         pluginClass: GpsTimePlugin
       ios:
         pluginClass: GpsTimePlugin
+      macos:
+        pluginClass: GpsTimePlugin
