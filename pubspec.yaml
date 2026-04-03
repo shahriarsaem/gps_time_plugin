@@ -1,0 +1,39 @@
+name: gps_time_plugin
+description: >-
+  A Flutter plugin that provides accurate GPS-synced time on Android and iOS.
+  Extracts trusted time directly from GPS location fixes, helping avoid
+  reliance on potentially manipulated or drifted device clocks.
+version: 0.0.1
+homepage: https://github.com/shahriarsaem/gps_time_plugin
+repository: https://github.com/shahriarsaem/gps_time_plugin
+issue_tracker: https://github.com/shahriarsaem/gps_time_plugin/issues
+
+topics:
+  - gps
+  - time
+  - location
+  - clock
+  - trusted-time
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+  flutter: '>=3.3.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  plugin_platform_interface: ^2.0.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.shahriarsaem.gpstimeplugin
+        pluginClass: GpsTimePlugin
+      ios:
+        pluginClass: GpsTimePlugin
