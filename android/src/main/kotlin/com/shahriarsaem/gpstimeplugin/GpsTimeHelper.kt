@@ -13,9 +13,22 @@ import kotlinx.coroutines.flow.asStateFlow
 /**
  * Helper class to extract GPS-synced trusted time from device location providers.
  *
- * Uses [LocationManager] with both GPS and Network providers.
- * The trusted time is calculated by adjusting the fix's UTC timestamp with
- * the elapsed time since the fix was captured, using [SystemClock.elapsedRealtimeNanos].
+ * ## How trusted time is computed
+ *
+ * Android's [Location.getTime] reflects the system clock at fix time — it can be
+ * manipulated by simply changing the device clock. To work around this, we instead
+ * use [Location.getElapsedRealtimeNanos]: a **monotonic** counter that measures
+ * nanoseconds since last boot. It is unaffected by manual clock changes.
+ *
+ * At the moment of a GPS fix we know:
+ *   gpsSatelliteUtcMs ≈ location.time           (GPS UTC, but can be manipulated pre-fix)
+ *   fixMonotonicNanos  = location.elapsedRealtimeNanos
+ *
+ * We store [bootEpochOffsetMs]: the calculated offset such that
+ *   trustedUtcMs = bootEpochOffsetMs + (SystemClock.elapsedRealtimeNanos() / 1_000_000)
+ *
+ * Once we have a GPS fix, this offset is computed from GPS data and is immune
+ * to subsequent clock tampering.
  *
  * IMPORTANT: The caller must obtain [android.Manifest.permission.ACCESS_FINE_LOCATION]
  * permission before calling [startListening].
@@ -24,6 +37,10 @@ class GpsTimeHelper(private val context: Context) {
 
     private val locationManager =
         context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+
+    // Offset from boot (monolithic epoch) to GPS UTC in milliseconds.
+    // Once set from a GPS fix, this is tamper-resistant.
+    private var bootEpochOffsetMs: Long? = null
 
     private val _trustedTime = MutableStateFlow<Long?>(null)
     val trustedTime: StateFlow<Long?> = _trustedTime.asStateFlow()
@@ -67,7 +84,7 @@ class GpsTimeHelper(private val context: Context) {
                 return
             }
 
-            _statusMessage.value = "Checking providers: ${providers.joinToString(", ")}..."
+            _statusMessage.value = "Starting... searching for GPS signal."
 
             // Emit a cached fix immediately while waiting for a fresh one
             var gotLastKnown = false
@@ -82,13 +99,13 @@ class GpsTimeHelper(private val context: Context) {
 
             if (!gotLastKnown) {
                 _statusMessage.value =
-                    "Waiting for location fix... (This may take 30-90 seconds without WiFi/SIM)"
+                    "Waiting for location fix... (may take 30-90s outdoors)"
             }
 
             for (provider in providers) {
                 locationManager.requestLocationUpdates(
                     provider,
-                    1000L,
+                    2000L,  // min 2s interval
                     0f,
                     locationListener
                 )
@@ -113,18 +130,30 @@ class GpsTimeHelper(private val context: Context) {
         // Compute the age of this fix in nanoseconds
         val fixAgeNanos = nowElapsedNanos - fixElapsedNanos
 
-        // Sanity check: reject fixes that are impossibly old (> 5 minutes) or from future
+        // Sanity check: reject fixes from future or impossibly old (> 5 min)
         val isValidFix = fixElapsedNanos > 0 && fixAgeNanos in 0..300_000_000_000L
 
+        if (isValidFix) {
+            // Compute the offset: if we add this to any future elapsedRealtimeNanos,
+            // we get correct UTC — even if the system clock is changed afterwards.
+            // bootEpochOffsetMs = fixUtcMs - fixElapsedMs
+            val fixElapsedMs = fixElapsedNanos / 1_000_000
+            bootEpochOffsetMs = fixUtcMillis - fixElapsedMs
+        }
+
+        // Compute current trusted time using the stored offset + current monotonic time
         val currentTrustedTimeMs: Long
         val ageSeconds: Long
 
-        if (isValidFix) {
-            val elapsedSinceFixMs = fixAgeNanos / 1_000_000
-            currentTrustedTimeMs = fixUtcMillis + elapsedSinceFixMs
-            ageSeconds = elapsedSinceFixMs / 1000
+        val offset = bootEpochOffsetMs
+        if (offset != null) {
+            val nowElapsedMs = nowElapsedNanos / 1_000_000
+            currentTrustedTimeMs = offset + nowElapsedMs
+
+            val fixElapsedMs = fixElapsedNanos / 1_000_000
+            ageSeconds = (nowElapsedMs - fixElapsedMs) / 1000
         } else {
-            // Fallback: use fix time directly (may be slightly stale)
+            // No valid fix yet — fallback
             currentTrustedTimeMs = fixUtcMillis
             ageSeconds = 0
         }

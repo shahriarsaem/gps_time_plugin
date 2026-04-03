@@ -12,7 +12,7 @@ Pod::Spec.new do |s|
   DESC
   s.homepage         = 'https://github.com/shahriarsaem/gps_time_plugin'
   s.license          = { :file => '../LICENSE' }
-  s.author           = { 'Shahriar Saem' => 'shahriarsaem@example.com' }
+  s.author           = { 'Shahriar Saem' => 'saemshahriar@gmail.com' }
   s.source           = { :path => '.' }
   s.source_files = 'Classes/**/*'
   s.dependency 'Flutter'

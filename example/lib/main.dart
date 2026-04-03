@@ -39,35 +39,58 @@ class _GpsTimeHomePageState extends State<GpsTimeHomePage> {
   final _plugin = GpsTimePlugin();
 
   StreamSubscription<GpsTimeState>? _subscription;
+  Timer? _clockTimer;
+
   GpsTimeState _state = const GpsTimeState(statusMessage: 'Press Start to begin');
+
+  /// Updated every second by [_clockTimer] — independent of the GPS stream so
+  /// clock drift is visible immediately after a manual time change.
+  DateTime _deviceNow = DateTime.now();
   bool _isListening = false;
 
   @override
   void dispose() {
     _subscription?.cancel();
+    _clockTimer?.cancel();
     _plugin.stopListening();
     super.dispose();
   }
 
   Future<void> _startListening() async {
-    // Request location permission first
     final status = await Permission.locationWhenInUse.request();
     if (!status.isGranted) {
       setState(() {
-        _state = const GpsTimeState(statusMessage: 'Location permission denied');
+        _state = const GpsTimeState(
+          statusMessage: 'Location permission denied. Enable in Settings.',
+        );
       });
       return;
     }
 
+    // ✅ Subscribe FIRST so we never miss the initial status event.
+    // EventChannel onListen fires when .listen() is called below,
+    // wiring the native combine flow before startListening() gets called.
+    _subscription = _plugin.gpsTimeStream.listen(
+      (state) => setState(() => _state = state),
+      onError: (e) => setState(
+        () => _state = GpsTimeState(statusMessage: 'Stream error: $e'),
+      ),
+    );
+
     await _plugin.startListening();
-    _subscription = _plugin.gpsTimeStream.listen((state) {
-      setState(() => _state = state);
+
+    // ✅ Tick every second so Device Time and Clock Drift update live,
+    // making manual time-change effects immediately visible in the UI.
+    _clockTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      setState(() => _deviceNow = DateTime.now());
     });
 
     setState(() => _isListening = true);
   }
 
   Future<void> _stopListening() async {
+    _clockTimer?.cancel();
+    _clockTimer = null;
     await _subscription?.cancel();
     _subscription = null;
     await _plugin.stopListening();
@@ -80,6 +103,11 @@ class _GpsTimeHomePageState extends State<GpsTimeHomePage> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+
+    // Compute drift against live device clock so it updates every second.
+    final drift = _state.trustedTime != null
+        ? _state.trustedTime!.difference(_deviceNow.toUtc())
+        : null;
 
     return Scaffold(
       appBar: AppBar(
@@ -98,7 +126,11 @@ class _GpsTimeHomePageState extends State<GpsTimeHomePage> {
             children: [
               _StatusCard(state: _state),
               const SizedBox(height: 20),
-              _InfoGrid(state: _state),
+              _InfoGrid(
+                state: _state,
+                deviceNow: _deviceNow,
+                drift: drift,
+              ),
               const Spacer(),
               _ControlButton(
                 isListening: _isListening,
@@ -115,7 +147,7 @@ class _GpsTimeHomePageState extends State<GpsTimeHomePage> {
   }
 }
 
-// ─── Status Card ────────────────────────────────────────────────────────────
+// ─── Status Card ─────────────────────────────────────────────────────────────
 
 class _StatusCard extends StatelessWidget {
   final GpsTimeState state;
@@ -138,7 +170,7 @@ class _StatusCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(20),
         border: Border.all(
           color: hasFix
-              ? const Color(0xFF00E5FF).withOpacity(0.4)
+              ? const Color(0xFF00E5FF).withValues(alpha: 0.4)
               : Colors.white12,
           width: 1,
         ),
@@ -152,9 +184,7 @@ class _StatusCard extends StatelessWidget {
           ),
           const SizedBox(height: 12),
           Text(
-            state.trustedTime != null
-                ? _formatTime(state.trustedTime!)
-                : '--:--:--',
+            hasFix ? _formatTime(state.trustedTime!) : '--:--:--',
             style: const TextStyle(
               fontSize: 40,
               fontWeight: FontWeight.w700,
@@ -164,12 +194,10 @@ class _StatusCard extends StatelessWidget {
           ),
           const SizedBox(height: 4),
           Text(
-            state.trustedTime != null
-                ? _formatDate(state.trustedTime!)
-                : 'No GPS fix yet',
+            hasFix ? _formatDate(state.trustedTime!) : 'No GPS fix yet',
             style: TextStyle(
               fontSize: 14,
-              color: Colors.white.withOpacity(0.6),
+              color: Colors.white.withValues(alpha: 0.6),
               letterSpacing: 1,
             ),
           ),
@@ -198,7 +226,10 @@ class _StatusCard extends StatelessWidget {
 
   String _formatDate(DateTime dt) {
     final local = dt.toLocal();
-    return '${local.year}-${_pad(local.month)}-${_pad(local.day)} (UTC${dt.timeZoneOffset.isNegative ? '-' : '+'}${_pad(dt.timeZoneOffset.inHours.abs())})';
+    final offset = local.timeZoneOffset;
+    final sign = offset.isNegative ? '-' : '+';
+    final h = offset.inHours.abs();
+    return '${local.year}-${_pad(local.month)}-${_pad(local.day)} (UTC$sign${_pad(h)})';
   }
 
   String _pad(int n) => n.toString().padLeft(2, '0');
@@ -208,10 +239,24 @@ class _StatusCard extends StatelessWidget {
 
 class _InfoGrid extends StatelessWidget {
   final GpsTimeState state;
-  const _InfoGrid({required this.state});
+  final DateTime deviceNow;
+  final Duration? drift;
+
+  const _InfoGrid({
+    required this.state,
+    required this.deviceNow,
+    required this.drift,
+  });
 
   @override
   Widget build(BuildContext context) {
+    final driftMs = drift?.inMilliseconds;
+    final driftText = driftMs != null
+        ? '${driftMs > 0 ? '+' : ''}$driftMs ms'
+        : '—';
+    // Turn red when drift exceeds 5 seconds — indicates clock manipulation
+    final bigDrift = driftMs != null && driftMs.abs() > 5000;
+
     return GridView.count(
       crossAxisCount: 2,
       shrinkWrap: true,
@@ -234,17 +279,15 @@ class _InfoGrid extends StatelessWidget {
         ),
         _InfoTile(
           icon: Icons.access_time,
+          // ✅ Uses live _deviceNow from 1s timer, not the stale stream value
           label: 'Device Time',
-          value: state.deviceTime != null
-              ? _hms(state.deviceTime!.toLocal())
-              : '—',
+          value: _hms(deviceNow),
         ),
         _InfoTile(
           icon: Icons.compare_arrows,
           label: 'Clock Drift',
-          value: (state.trustedTime != null && state.deviceTime != null)
-              ? '${state.trustedTime!.difference(state.deviceTime!).inMilliseconds} ms'
-              : '—',
+          value: driftText,
+          valueColor: bigDrift ? Colors.redAccent : null,
         ),
       ],
     );
@@ -259,11 +302,13 @@ class _InfoTile extends StatelessWidget {
   final IconData icon;
   final String label;
   final String value;
+  final Color? valueColor;
 
   const _InfoTile({
     required this.icon,
     required this.label,
     required this.value,
+    this.valueColor,
   });
 
   @override
@@ -286,16 +331,15 @@ class _InfoTile extends StatelessWidget {
               children: [
                 Text(
                   label,
-                  style:
-                      const TextStyle(fontSize: 10, color: Colors.white38),
+                  style: const TextStyle(fontSize: 10, color: Colors.white38),
                 ),
                 const SizedBox(height: 2),
                 Text(
                   value,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 14,
                     fontWeight: FontWeight.w600,
-                    color: Colors.white,
+                    color: valueColor ?? Colors.white,
                   ),
                 ),
               ],
